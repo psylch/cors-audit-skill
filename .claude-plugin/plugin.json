@@ -1,0 +1,12 @@
+{
+  "name": "cors-audit",
+  "description": "Comprehensive CORS audit skill — diagnose misconfigurations, duplicate headers, and cross-origin issues across gateway, backend, and frontend layers. Covers standard setups, micro-app architectures (Qiankun, single-spa), and multi-origin scenarios.",
+  "version": "1.0.0",
+  "author": {
+    "name": "psylch"
+  },
+  "homepage": "https://github.com/psylch/cors-audit-skill",
+  "repository": "https://github.com/psylch/cors-audit-skill",
+  "license": "MIT",
+  "keywords": ["cors", "cross-origin", "audit", "security", "caddy", "nginx", "micro-app", "qiankun", "fastapi", "express"]
+}

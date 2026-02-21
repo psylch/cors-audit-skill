@@ -1,0 +1,20 @@
+{
+  "name": "psylch-cors-audit-skill",
+  "owner": {
+    "name": "psylch"
+  },
+  "metadata": {
+    "description": "Architecture-level CORS audit skill with automated validation"
+  },
+  "plugins": [
+    {
+      "name": "cors-audit",
+      "source": "./",
+      "description": "Comprehensive CORS audit — 6-phase walkthrough covering gateway/backend/frontend layers, micro-app architectures, and automated validation via bundled Python script. Diagnoses duplicate headers, wildcard+credentials conflicts, preflight issues, and environment misconfiguration.",
+      "version": "1.0.0",
+      "category": "developer-tools",
+      "tags": ["cors", "security", "audit", "caddy", "nginx", "micro-app", "qiankun"],
+      "homepage": "https://github.com/psylch/cors-audit-skill"
+    }
+  ]
+}

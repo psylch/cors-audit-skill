@@ -21,7 +21,7 @@ Perform a systematic CORS configuration audit across all layers of a web project
 - Migrating from direct API access to gateway-proxied architecture
 - Embedding micro-apps (Qiankun, single-spa, Module Federation) into a host application
 
-## Audit Process
+## How It Works
 
 ### Phase 1: Architecture Discovery
 
@@ -65,8 +65,8 @@ Collect CORS-related configuration from every layer. For each layer, document:
 **Run static config validation** on each gateway/proxy config file found:
 
 ```bash
-python scripts/validate_cors.py --config path/to/Caddyfile
-python scripts/validate_cors.py --config path/to/nginx.conf
+python scripts/validate_cors.py validate --config path/to/Caddyfile
+python scripts/validate_cors.py validate --config path/to/nginx.conf
 ```
 
 This detects wildcard+credentials conflicts, missing preflight handlers, dual-layer CORS signals (`header_down`/`proxy_hide_header`), and Nginx scope inheritance issues.
@@ -93,7 +93,7 @@ Audit steps:
 **Verify the single-layer rule on live endpoints** — this is the most reliable check because it catches headers added by any layer, including ones not visible in static config:
 
 ```bash
-python scripts/validate_cors.py --url https://your-api.com/health --origin https://your-frontend.com
+python scripts/validate_cors.py validate --url https://your-api.com/health --origin https://your-frontend.com
 ```
 
 The script uses raw HTTP connections to detect duplicate `Access-Control-Allow-Origin` headers that browsers would reject. This is the check that catches the gateway+backend double-header bug.
@@ -141,20 +141,20 @@ Reference `references/cors_checklist.md` for the full per-item checklist. Key va
 
 ```bash
 # Single endpoint
-python scripts/validate_cors.py --url https://your-api.com/api/health --origin https://your-frontend.com
+python scripts/validate_cors.py validate --url https://your-api.com/api/health --origin https://your-frontend.com
 
 # Batch: create an endpoints.txt with one URL per line, then:
-python scripts/validate_cors.py --url-file endpoints.txt --origin https://your-frontend.com
+python scripts/validate_cors.py validate --url-file endpoints.txt --origin https://your-frontend.com
 ```
 
 For micro-app scenarios, test with **both** the standalone origin and the host application origin:
 
 ```bash
 # Standalone access
-python scripts/validate_cors.py --url https://micro.example.com/api/health --origin https://micro.example.com
+python scripts/validate_cors.py validate --url https://micro.example.com/api/health --origin https://micro.example.com
 
 # Embedded access (this is the one that usually breaks)
-python scripts/validate_cors.py --url https://micro.example.com/api/health --origin https://host-app.example.com
+python scripts/validate_cors.py validate --url https://micro.example.com/api/health --origin https://host-app.example.com
 ```
 
 ### Phase 6: Report Findings
@@ -177,10 +177,23 @@ Classify issues by severity:
 **Generate a JSON report for archival or CI integration:**
 
 ```bash
-python scripts/validate_cors.py --url https://your-api.com/api/health --origin https://your-frontend.com --format json --output cors-report.json
+# Preflight check
+python scripts/validate_cors.py preflight
+
+# Detailed JSON report (default)
+python scripts/validate_cors.py validate --url https://your-api.com/api/health --origin https://your-frontend.com
+
+# Concise summary (finding counts only)
+python scripts/validate_cors.py validate --url https://your-api.com/api/health --origin https://your-frontend.com --format concise
+
+# Save to file
+python scripts/validate_cors.py validate --url https://your-api.com/api/health --origin https://your-frontend.com --output cors-report.json
+
+# Limit findings returned
+python scripts/validate_cors.py validate --url https://your-api.com/api/health --origin https://your-frontend.com --limit 10
 ```
 
-Exit codes: `0` = pass, `2` = critical issues found. Use this in CI pipelines to fail builds on CORS regressions.
+Exit codes reflect **script execution status**, not audit results: `0` = success (audit completed, results in stdout), `1` = recoverable runtime error, `2` = unrecoverable runtime error. Finding severity is reported in the JSON output `summary` and `hint` fields.
 
 ## Common Pitfalls Quick Reference
 
@@ -198,19 +211,29 @@ Exit codes: `0` = pass, `2` = critical issues found. Use this in CI pipelines to
 
 `scripts/validate_cors.py` — zero-dependency Python script for automated CORS validation.
 
-**Modes:**
+**Subcommands:**
+
+| Subcommand | What it does |
+|------------|-------------|
+| `preflight` | Check runtime dependencies (Python version). Returns standard preflight JSON. |
+| `validate` | Run CORS validation on endpoints or config files. |
+
+**Validate modes:**
 
 | Mode | Command | What it does |
 |------|---------|-------------|
-| Live endpoint | `--url URL --origin ORIGIN` | Sends OPTIONS + GET, checks duplicate headers, preflight, origin policy |
-| Batch endpoints | `--url-file FILE --origin ORIGIN` | Same as above, one URL per line (skip blanks and #comments) |
-| Static config | `--config FILE` | Parses Caddyfile / nginx.conf / JSON for misconfigurations |
+| Live endpoint | `validate --url URL --origin ORIGIN` | Sends OPTIONS + GET, checks duplicate headers, preflight, origin policy |
+| Batch endpoints | `validate --url-file FILE --origin ORIGIN` | Same as above, one URL per line (skip blanks and #comments) |
+| Static config | `validate --config FILE` | Parses Caddyfile / nginx.conf / JSON for misconfigurations |
 
-**Options:**
+**Options (validate subcommand):**
 
 | Flag | Purpose |
 |------|---------|
-| `--format json` | Output structured JSON instead of text |
+| `--format json` | Detailed JSON output with full findings (default) |
+| `--format concise` | JSON summary only — finding counts by severity, no full findings |
+| `--format text` | Human-readable text report |
+| `--limit N` | Cap the number of findings returned in JSON output |
 | `--output FILE` | Write report to file instead of stdout |
 
-**Exit codes:** `0` = pass, `2` = critical issues found.
+**Exit codes:** `0` = success (audit completed), `1` = recoverable runtime error, `2` = unrecoverable runtime error. Audit finding severity is in the JSON `summary` field, not the exit code.

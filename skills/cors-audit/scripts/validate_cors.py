@@ -2,17 +2,26 @@
 """CORS configuration validator for live endpoints and static config files.
 
 Usage:
-    # Test a live endpoint
-    python validate_cors.py --url https://api.example.com/api/health --origin https://app.example.com
+    # Preflight check
+    python validate_cors.py preflight
 
-    # Test multiple endpoints from a file (one URL per line)
-    python validate_cors.py --url-file endpoints.txt --origin https://app.example.com
+    # Validate a live endpoint (JSON output by default)
+    python validate_cors.py validate --url https://api.example.com/api/health --origin https://app.example.com
+
+    # Validate multiple endpoints from a file
+    python validate_cors.py validate --url-file endpoints.txt --origin https://app.example.com
 
     # Validate a static config (Caddyfile, nginx.conf, or JSON policy)
-    python validate_cors.py --config Caddyfile
+    python validate_cors.py validate --config Caddyfile
 
-    # Output JSON report
-    python validate_cors.py --url https://api.example.com/api/health --origin https://app.example.com --output report.json
+    # Text output for humans
+    python validate_cors.py validate --url https://api.example.com/api/health --origin https://app.example.com --format text
+
+    # Concise JSON (summary only, no full findings)
+    python validate_cors.py validate --url https://api.example.com/api/health --origin https://app.example.com --format concise
+
+    # Limit number of findings returned
+    python validate_cors.py validate --url https://api.example.com/api/health --origin https://app.example.com --limit 5
 """
 
 import argparse
@@ -57,6 +66,43 @@ class ConfigResult:
     file: str
     config_type: str
     findings: list = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def emit_error(error: str, hint: str, recoverable: bool, exit_code: int):
+    """Print a JSON error to stderr and exit with the given code."""
+    print(json.dumps({
+        "error": error,
+        "hint": hint,
+        "recoverable": recoverable,
+    }), file=sys.stderr)
+    sys.exit(exit_code)
+
+
+def _count_severities(findings: list) -> dict:
+    """Count findings by severity level."""
+    counts = {"critical": 0, "warning": 0, "info": 0}
+    for f in findings:
+        sev = f.severity.value if hasattr(f.severity, "value") else f.severity
+        counts[sev] = counts.get(sev, 0) + 1
+    return counts
+
+
+def _make_hint(counts: dict) -> str:
+    """Generate a human-readable hint from severity counts."""
+    parts = []
+    if counts["critical"] > 0:
+        parts.append(f"{counts['critical']} critical")
+    if counts["warning"] > 0:
+        parts.append(f"{counts['warning']} warning")
+    if counts["info"] > 0:
+        parts.append(f"{counts['info']} info")
+    if not parts:
+        return "No CORS issues found"
+    return f"Found {', '.join(parts)} issue(s)"
 
 
 # ---------------------------------------------------------------------------
@@ -570,19 +616,8 @@ def _validate_json_policy(filepath: str, content: str) -> ConfigResult:
 # Reporting
 # ---------------------------------------------------------------------------
 
-def format_report(results: list, output_format: str = "text") -> str:
-    """Format findings into a readable report."""
-    if output_format == "json":
-        data = []
-        for r in results:
-            d = asdict(r)
-            # Convert Severity enums to strings
-            for f in d.get("findings", []):
-                if hasattr(f["severity"], "value"):
-                    f["severity"] = f["severity"].value
-            data.append(d)
-        return json.dumps(data, indent=2, ensure_ascii=False)
-
+def format_text_report(results: list) -> str:
+    """Format findings into a human-readable text report."""
     lines = []
     lines.append("=" * 70)
     lines.append("CORS Audit Report")
@@ -623,15 +658,173 @@ def format_report(results: list, output_format: str = "text") -> str:
                  f"{total['warning']} warning, {total['info']} info")
 
     if total["critical"] > 0:
-        lines.append("STATUS: FAIL — critical issues must be resolved")
+        lines.append("STATUS: FAIL -- critical issues must be resolved")
     elif total["warning"] > 0:
-        lines.append("STATUS: WARN — review warnings before deploying")
+        lines.append("STATUS: WARN -- review warnings before deploying")
     else:
         lines.append("STATUS: PASS")
 
     lines.append("=" * 70)
 
     return "\n".join(lines)
+
+
+def format_json_report(results: list, fmt: str = "detailed", limit: Optional[int] = None) -> str:
+    """Format findings as JSON.
+
+    fmt: "detailed" returns full findings, "concise" returns only summary counts.
+    limit: if set, cap the number of findings returned (detailed mode only).
+    """
+    all_findings = []
+    result_data = []
+
+    for r in results:
+        d = asdict(r)
+        # Convert Severity enums to strings
+        for f in d.get("findings", []):
+            if hasattr(f["severity"], "value"):
+                f["severity"] = f["severity"].value
+        all_findings.extend(d.get("findings", []))
+        result_data.append(d)
+
+    counts = {"critical": 0, "warning": 0, "info": 0}
+    for f in all_findings:
+        sev = f["severity"]
+        counts[sev] = counts.get(sev, 0) + 1
+
+    hint = _make_hint(counts)
+
+    if fmt == "concise":
+        output = {
+            "summary": counts,
+            "total_findings": len(all_findings),
+            "hint": hint,
+        }
+    else:
+        # Apply limit to findings within each result
+        if limit is not None and limit > 0:
+            remaining = limit
+            for d in result_data:
+                d["findings"] = d["findings"][:remaining]
+                remaining -= len(d["findings"])
+                if remaining <= 0:
+                    break
+
+        output = {
+            "results": result_data,
+            "summary": counts,
+            "total_findings": len(all_findings),
+            "hint": hint,
+        }
+        if limit is not None:
+            output["limit_applied"] = limit
+
+    return json.dumps(output, indent=2, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# Subcommands
+# ---------------------------------------------------------------------------
+
+def cmd_preflight():
+    """Check that the script can run: Python version, stdlib availability."""
+    python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    ok = sys.version_info >= (3, 7)
+
+    result = {
+        "ready": ok,
+        "dependencies": {
+            "python3": {
+                "status": "ok" if ok else "error",
+                "version": python_version,
+                "minimum": "3.7",
+            }
+        },
+        "credentials": {},
+        "services": {},
+        "hint": f"CORS validator ready (Python {python_version})" if ok
+                else f"Python >= 3.7 required, found {python_version}",
+    }
+    print(json.dumps(result, indent=2))
+    sys.exit(0 if ok else 2)
+
+
+def cmd_validate(args):
+    """Run CORS validation on endpoints or config files."""
+    results = []
+
+    if args.url:
+        if not args.origin:
+            emit_error(
+                error="--origin is required when using --url",
+                hint="Add --origin https://your-frontend.com",
+                recoverable=True,
+                exit_code=1,
+            )
+        results.append(test_endpoint(args.url, args.origin))
+
+    elif args.url_file:
+        if not args.origin:
+            emit_error(
+                error="--origin is required when using --url-file",
+                hint="Add --origin https://your-frontend.com",
+                recoverable=True,
+                exit_code=1,
+            )
+        url_file_path = Path(args.url_file)
+        if not url_file_path.exists():
+            emit_error(
+                error=f"URL file not found: {args.url_file}",
+                hint="Check the file path and try again",
+                recoverable=True,
+                exit_code=1,
+            )
+        urls = url_file_path.read_text().strip().splitlines()
+        for url in urls:
+            url = url.strip()
+            if url and not url.startswith("#"):
+                results.append(test_endpoint(url, args.origin))
+
+    elif args.config:
+        config_path = Path(args.config)
+        if not config_path.exists():
+            emit_error(
+                error=f"Config file not found: {args.config}",
+                hint="Check the file path and try again",
+                recoverable=True,
+                exit_code=1,
+            )
+        results.append(validate_config(args.config))
+
+    else:
+        emit_error(
+            error="No input specified",
+            hint="Use --url, --url-file, or --config to specify what to validate",
+            recoverable=True,
+            exit_code=1,
+        )
+
+    # Format output
+    fmt = args.format
+    if fmt == "text":
+        report = format_text_report(results)
+    else:
+        # "json" (detailed) or "concise"
+        json_fmt = "concise" if fmt == "concise" else "detailed"
+        report = format_json_report(results, fmt=json_fmt, limit=args.limit)
+
+    if args.output:
+        Path(args.output).write_text(report, encoding="utf-8")
+        # Even when writing to file, produce JSON on stdout
+        print(json.dumps({
+            "hint": f"Report written to {args.output}",
+        }))
+    else:
+        print(report)
+
+    # Exit 0 always on successful audit completion.
+    # Audit finding severity does NOT affect exit code.
+    sys.exit(0)
 
 
 # ---------------------------------------------------------------------------
@@ -642,57 +835,41 @@ def main():
     parser = argparse.ArgumentParser(
         description="CORS configuration validator for live endpoints and static configs",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
     )
 
-    group = parser.add_mutually_exclusive_group(required=True)
+    subparsers = parser.add_subparsers(dest="command")
+
+    # preflight subcommand
+    subparsers.add_parser("preflight", help="Check runtime dependencies")
+
+    # validate subcommand
+    validate_parser = subparsers.add_parser("validate", help="Run CORS validation")
+
+    group = validate_parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--url", help="Live endpoint URL to test")
     group.add_argument("--url-file", help="File with URLs to test (one per line)")
     group.add_argument("--config", help="Static config file to validate (Caddyfile, nginx.conf, JSON)")
 
-    parser.add_argument("--origin", help="Origin header to send (required for --url/--url-file)")
-    parser.add_argument("--output", help="Output file path (default: stdout)")
-    parser.add_argument("--format", choices=["text", "json"], default="text",
-                        help="Output format (default: text)")
+    validate_parser.add_argument("--origin", help="Origin header to send (required for --url/--url-file)")
+    validate_parser.add_argument("--output", help="Output file path (default: stdout)")
+    validate_parser.add_argument("--format", choices=["json", "text", "concise"], default="json",
+                                 help="Output format: json (detailed, default), concise (summary only), text (human-readable)")
+    validate_parser.add_argument("--limit", type=int, default=None,
+                                 help="Max number of findings to include in JSON output")
 
     args = parser.parse_args()
 
-    results = []
-
-    if args.url:
-        if not args.origin:
-            parser.error("--origin is required when using --url")
-        results.append(test_endpoint(args.url, args.origin))
-
-    elif args.url_file:
-        if not args.origin:
-            parser.error("--origin is required when using --url-file")
-        urls = Path(args.url_file).read_text().strip().splitlines()
-        for url in urls:
-            url = url.strip()
-            if url and not url.startswith("#"):
-                results.append(test_endpoint(url, args.origin))
-
-    elif args.config:
-        results.append(validate_config(args.config))
-
-    report = format_report(results, args.format)
-
-    if args.output:
-        Path(args.output).write_text(report, encoding="utf-8")
-        print(f"Report written to {args.output}")
+    if args.command == "preflight":
+        cmd_preflight()
+    elif args.command == "validate":
+        cmd_validate(args)
     else:
-        print(report)
-
-    # Exit code based on severity
-    all_findings = []
-    for r in results:
-        all_findings.extend(r.findings)
-    has_critical = any(
-        (f.severity == Severity.CRITICAL or f.severity == "critical")
-        for f in all_findings
-    )
-    sys.exit(2 if has_critical else 0)
+        emit_error(
+            error=f"Unknown or missing subcommand: {args.command or '(none)'}",
+            hint="Valid subcommands: preflight, validate",
+            recoverable=True,
+            exit_code=1,
+        )
 
 
 if __name__ == "__main__":

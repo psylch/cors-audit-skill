@@ -735,9 +735,11 @@ def cmd_preflight():
         "ready": ok,
         "dependencies": {
             "python3": {
-                "status": "ok" if ok else "error",
+                "status": "ok" if ok else "missing",
                 "version": python_version,
                 "minimum": "3.7",
+                "hint": f"Python {python_version} OK" if ok
+                        else "Install Python 3.7+ (brew install python3 / apt install python3 / winget install Python.Python.3)",
             }
         },
         "credentials": {},

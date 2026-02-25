@@ -7,11 +7,16 @@ description: "This skill performs a comprehensive CORS (Cross-Origin Resource Sh
 
 Perform a systematic CORS configuration audit across all layers of a web project. Identify misconfigurations, redundant headers, and security issues before they cause production problems.
 
+## Language
+
+**Match user's language**: Respond in the same language the user uses.
+
 ## Bundled Resources
 
 - `scripts/validate_cors.py` — Automated CORS validator (Python stdlib, no dependencies)
 - `references/cors_checklist.md` — Detailed per-item audit checklist with pass/fail criteria
 - `references/architecture_patterns.md` — CORS strategy for each architecture type with configuration examples
+- `references/script_reference.md` — Full script subcommands, options, and usage examples
 
 ## When to Use
 
@@ -21,179 +26,116 @@ Perform a systematic CORS configuration audit across all layers of a web project
 - Migrating from direct API access to gateway-proxied architecture
 - Embedding micro-apps (Qiankun, single-spa, Module Federation) into a host application
 
+## Preflight
+
+Before starting, run the preflight check:
+
+```bash
+python scripts/validate_cors.py preflight
+```
+
+**Check-Fix table:**
+
+| Check | Fix |
+|-------|-----|
+| Python < 3.7 | Install Python 3.7+ (`brew install python3` / `apt install python3`) |
+| Python not found | Install Python (`brew install python3` / `apt install python3` / `winget install Python.Python.3`) |
+
+## Degradation Strategy
+
+When live endpoints are unreachable (network failures, firewall, VPN required):
+
+| Situation | Strategy |
+|-----------|----------|
+| Live endpoint unreachable | **Skip** Phases 3/5 live validation; rely on static config analysis only |
+| Some endpoints reachable, some not | Validate reachable endpoints; report unreachable ones as "skipped — not reachable" |
+| No network access at all | Run static-only audit (Phases 1, 2, 4 config review); note that live validation was skipped in the report |
+
+Always inform the user which validations were skipped and why. Static config analysis alone can still catch the majority of CORS issues (duplicate headers, wildcard+credentials, missing OPTIONS handlers).
+
 ## How It Works
+
+Print this checklist at the start and update it as each phase completes:
+
+```
+Progress:
+- [ ] Phase 1: Architecture Discovery
+- [ ] Phase 2: Config Collection & Static Validation
+- [ ] Phase 3: Single-Layer Rule Verification
+- [ ] Phase 4: Best Practices Validation
+- [ ] Phase 5: Environment-Specific Validation
+- [ ] Phase 6: Report Findings
+```
 
 ### Phase 1: Architecture Discovery
 
-Before examining any configuration, determine the project's architecture type:
+Determine the project's architecture type before examining configuration:
 
-1. **Identify all network layers** between browser and backend:
-   - Reverse proxy / API gateway (Caddy, Nginx, Traefik, Cloudflare)
-   - Backend framework (FastAPI, Express, Spring Boot, etc.)
-   - CDN or edge functions
+1. **Identify all network layers** between browser and backend (reverse proxy, API gateway, backend framework, CDN/edge)
+2. **Classify the architecture** — reference `references/architecture_patterns.md`:
+   - Same-origin / Simple cross-origin / Gateway-proxied / Micro-app embedded / Multi-consumer API
+3. **Map all request flows** — trace Origin header from browser to backend, noting proxy hops and credential requirements
 
-2. **Classify the architecture** — reference `references/architecture_patterns.md` for details:
-   - **Same-origin**: Frontend and API served from the same domain — CORS not needed
-   - **Simple cross-origin**: Frontend on domain A, API on domain B
-   - **Gateway-proxied**: Frontend and API behind a single gateway domain
-   - **Micro-app embedded**: App embedded in a host application on a different domain
-   - **Multi-consumer API**: API consumed by multiple known domains
+### Phase 2: Config Collection & Static Validation
 
-3. **Map all request flows** — trace from browser to backend:
-   - What domain does the browser request originate from? (the `Origin` header)
-   - What domain does the request target?
-   - Does the request pass through a gateway/proxy?
-   - Are credentials (cookies, auth headers) required?
-
-### Phase 2: Configuration Collection and Static Validation
-
-Collect CORS-related configuration from every layer. For each layer, document:
-- Where CORS headers are set
-- What `Access-Control-Allow-Origin` value is used
-- Whether `Access-Control-Allow-Credentials` is set
-- How preflight (OPTIONS) requests are handled
-
-**Layer checklist:**
+Collect CORS config from every layer. For each, document: where headers are set, `Allow-Origin` value, `Allow-Credentials` flag, OPTIONS handling.
 
 | Layer | What to check |
 |-------|---------------|
-| Gateway/Proxy | Config file (Caddyfile, nginx.conf, etc.) — CORS headers, OPTIONS handling |
+| Gateway/Proxy | Config file (Caddyfile, nginx.conf) — CORS headers, OPTIONS handling |
 | Backend | CORS middleware config — origin lists, regex patterns, credential flags |
-| Frontend | API base URL config — same-origin, relative path, or cross-origin absolute URL? |
+| Frontend | API base URL — same-origin, relative path, or cross-origin absolute URL? |
 | Environment vars | Different CORS settings per environment (dev/staging/production)? |
 
-**Run static config validation** on each gateway/proxy config file found:
+Run static validation on each config file found:
 
 ```bash
 python scripts/validate_cors.py validate --config path/to/Caddyfile
-python scripts/validate_cors.py validate --config path/to/nginx.conf
 ```
-
-This detects wildcard+credentials conflicts, missing preflight handlers, dual-layer CORS signals (`header_down`/`proxy_hide_header`), and Nginx scope inheritance issues.
 
 ### Phase 3: Apply the Single-Layer Rule
 
-**The #1 CORS best practice: CORS headers must be set by exactly ONE layer.**
+**The #1 CORS best practice: CORS headers must be set by exactly ONE layer.** Duplicate headers are the most common CORS bug.
 
-Duplicate headers are the most common CORS bug. When both a gateway and backend add `Access-Control-Allow-Origin`, the browser receives two values and rejects the response.
+1. **Count CORS-setting layers** — flag if more than one
+2. **Choose the authoritative layer** (gateway-proxied -> gateway; no gateway -> backend; CDN/edge -> edge)
+3. **Verify non-authoritative layers are silent**
+4. **If dual layers unavoidable**, strip upstream headers (Caddy: `header_down -Access-Control-Allow-Origin`; Nginx: `proxy_hide_header`)
 
-Audit steps:
-
-1. **Count CORS-setting layers** — if more than one layer adds CORS headers, flag it immediately
-2. **Choose the authoritative layer** based on architecture:
-   - Gateway-proxied → gateway handles CORS, backend CORS disabled in production
-   - No gateway → backend handles CORS
-   - CDN/edge → edge handles CORS if it terminates the request
-3. **Verify non-authoritative layers are silent** — they must not add any `Access-Control-*` headers
-4. **If dual layers are unavoidable** (e.g., cannot modify backend), the gateway must strip upstream CORS headers:
-   - Caddy: `header_down -Access-Control-Allow-Origin`
-   - Nginx: `proxy_hide_header Access-Control-Allow-Origin;`
-   - Note: stripping is a workaround, not best practice — prefer disabling at source
-
-**Verify the single-layer rule on live endpoints** — this is the most reliable check because it catches headers added by any layer, including ones not visible in static config:
+**Verify on live endpoints** (most reliable — catches headers from any layer):
 
 ```bash
 python scripts/validate_cors.py validate --url https://your-api.com/health --origin https://your-frontend.com
 ```
 
-The script uses raw HTTP connections to detect duplicate `Access-Control-Allow-Origin` headers that browsers would reject. This is the check that catches the gateway+backend double-header bug.
+### Phase 4: Validate Against Best Practices
 
-### Phase 4: Validate Configuration Against Best Practices
+Reference `references/cors_checklist.md` for the full per-item checklist. Key areas:
 
-Reference `references/cors_checklist.md` for the full per-item checklist. Key validations:
-
-**Origin policy:**
-- Never use `Access-Control-Allow-Origin: *` with `Access-Control-Allow-Credentials: true` — browsers reject this
-- Prefer specific origins over wildcards in production
-- For multiple origins, implement dynamic origin reflection (check request Origin against whitelist, echo back the matched origin)
-
-**Preflight handling:**
-- OPTIONS requests must return 204 (No Content) with all required CORS headers
-- Include `Access-Control-Max-Age` to reduce preflight frequency
-- Verify the gateway or backend actually handles OPTIONS — some frameworks ignore it by default
-
-**Credentials:**
-- If the frontend sends cookies or `Authorization` headers, `Access-Control-Allow-Credentials: true` is required
-- With credentials, `Access-Control-Allow-Origin` must be a specific origin (not `*`)
-
-**Headers and methods:**
-- `Access-Control-Allow-Headers` must include all custom headers the frontend sends
-- `Access-Control-Allow-Methods` must include all HTTP methods used
+- **Origin policy**: No `*` with credentials; prefer specific origins in production; dynamic reflection for multiple origins
+- **Preflight**: OPTIONS returns 204 with all CORS headers; include `Max-Age`
+- **Credentials**: `Allow-Credentials: true` requires specific origin (not `*`)
+- **Headers/Methods**: `Allow-Headers` and `Allow-Methods` must cover all frontend usage
 
 ### Phase 5: Environment-Specific Validation
 
-1. **Development environment:**
-   - Backend CORS should be enabled (e.g., `ENABLE_CORS=true`) since there is no gateway
-   - Frontend API base URL should point to `localhost` backend
-   - Wildcard origins are acceptable for local dev
+- **Dev**: Backend CORS enabled, frontend points to localhost, wildcards acceptable
+- **Production**: Backend CORS disabled if gateway handles it, explicit origins only
+- **Micro-app**: Origin = host domain; gateway must allow host domain; API URL must be absolute
 
-2. **Production environment:**
-   - If using a gateway, backend CORS should be disabled
-   - Frontend API base URL should route through the gateway (relative path or gateway domain)
-   - Origins must be explicit, not wildcards
-
-3. **Micro-app / embedded environment:**
-   - The `Origin` header will be the host application's domain, not the micro-app's domain
-   - The gateway must allow the host domain in `Access-Control-Allow-Origin`
-   - Frontend API base URL must be an absolute URL to the gateway (relative paths resolve to the host domain, causing 404s)
-
-**For production endpoints, run a full live validation** to confirm all the above in the real environment:
-
-```bash
-# Single endpoint
-python scripts/validate_cors.py validate --url https://your-api.com/api/health --origin https://your-frontend.com
-
-# Batch: create an endpoints.txt with one URL per line, then:
-python scripts/validate_cors.py validate --url-file endpoints.txt --origin https://your-frontend.com
-```
-
-For micro-app scenarios, test with **both** the standalone origin and the host application origin:
-
-```bash
-# Standalone access
-python scripts/validate_cors.py validate --url https://micro.example.com/api/health --origin https://micro.example.com
-
-# Embedded access (this is the one that usually breaks)
-python scripts/validate_cors.py validate --url https://micro.example.com/api/health --origin https://host-app.example.com
-```
+Run live validation on production endpoints — see `references/script_reference.md` for batch and micro-app testing examples.
 
 ### Phase 6: Report Findings
 
-Produce a summary table:
+Produce a summary table and classify issues:
 
-```
-| Layer    | CORS Active? | Origin Policy         | Credentials | Issues |
-|----------|--------------|-----------------------|-------------|--------|
-| Gateway  | Yes          | https://example.com   | true        | None   |
-| Backend  | No (prod)    | N/A                   | N/A         | None   |
-| Frontend | N/A          | Requests via gateway  | N/A         | None   |
-```
-
-Classify issues by severity:
 - **Critical**: Duplicate CORS headers, `*` with credentials, missing CORS entirely
-- **Warning**: Wildcards in production, missing `Access-Control-Max-Age`, overly broad `Allow-Headers`
-- **Info**: Suggestions for simplification or consistency
+- **Warning**: Wildcards in production, missing `Max-Age`, overly broad `Allow-Headers`
+- **Info**: Simplification and consistency suggestions
 
-**Generate a JSON report for archival or CI integration:**
+Generate a JSON report: see `references/script_reference.md` for output format options (`--format`, `--output`, `--limit`).
 
-```bash
-# Preflight check
-python scripts/validate_cors.py preflight
-
-# Detailed JSON report (default)
-python scripts/validate_cors.py validate --url https://your-api.com/api/health --origin https://your-frontend.com
-
-# Concise summary (finding counts only)
-python scripts/validate_cors.py validate --url https://your-api.com/api/health --origin https://your-frontend.com --format concise
-
-# Save to file
-python scripts/validate_cors.py validate --url https://your-api.com/api/health --origin https://your-frontend.com --output cors-report.json
-
-# Limit findings returned
-python scripts/validate_cors.py validate --url https://your-api.com/api/health --origin https://your-frontend.com --limit 10
-```
-
-Exit codes reflect **script execution status**, not audit results: `0` = success (audit completed, results in stdout), `1` = recoverable runtime error, `2` = unrecoverable runtime error. Finding severity is reported in the JSON output `summary` and `hint` fields.
+Exit codes reflect script execution status, not audit severity. Finding severity is in the JSON `summary` field.
 
 ## Common Pitfalls Quick Reference
 
@@ -206,34 +148,3 @@ Exit codes reflect **script execution status**, not audit results: `0` = success
 | 404 on API when embedded as micro-app | Relative path resolves to host domain | Use absolute URL to gateway |
 | Works standalone, fails when embedded | Origin is host domain, not app domain | Allow host domain in CORS config |
 | Server-to-server calls unaffected | CORS is browser-only | Investigate auth/network issues instead |
-
-## Script Reference
-
-`scripts/validate_cors.py` — zero-dependency Python script for automated CORS validation.
-
-**Subcommands:**
-
-| Subcommand | What it does |
-|------------|-------------|
-| `preflight` | Check runtime dependencies (Python version). Returns standard preflight JSON. |
-| `validate` | Run CORS validation on endpoints or config files. |
-
-**Validate modes:**
-
-| Mode | Command | What it does |
-|------|---------|-------------|
-| Live endpoint | `validate --url URL --origin ORIGIN` | Sends OPTIONS + GET, checks duplicate headers, preflight, origin policy |
-| Batch endpoints | `validate --url-file FILE --origin ORIGIN` | Same as above, one URL per line (skip blanks and #comments) |
-| Static config | `validate --config FILE` | Parses Caddyfile / nginx.conf / JSON for misconfigurations |
-
-**Options (validate subcommand):**
-
-| Flag | Purpose |
-|------|---------|
-| `--format json` | Detailed JSON output with full findings (default) |
-| `--format concise` | JSON summary only — finding counts by severity, no full findings |
-| `--format text` | Human-readable text report |
-| `--limit N` | Cap the number of findings returned in JSON output |
-| `--output FILE` | Write report to file instead of stdout |
-
-**Exit codes:** `0` = success (audit completed), `1` = recoverable runtime error, `2` = unrecoverable runtime error. Audit finding severity is in the JSON `summary` field, not the exit code.
